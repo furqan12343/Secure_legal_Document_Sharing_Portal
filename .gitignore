@@ -1,0 +1,7 @@
+.env
+*.db
+__pycache__/
+*.pyc
+.venv/
+backend/storage/encrypted_files/*
+!backend/storage/encrypted_files/.gitkeep

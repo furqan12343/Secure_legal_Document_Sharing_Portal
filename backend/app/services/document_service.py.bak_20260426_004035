@@ -1,0 +1,88 @@
+"""
+File: document_service.py
+Purpose: Secure document upload, encrypted storage, listing, and download.
+Security: Upload validates/scans/encrypts; access checks run before every view/download.
+"""
+import uuid
+from fastapi import HTTPException, UploadFile
+from sqlalchemy.orm import Session
+from app.models import Case, Document, DocumentAccess, FileScanResult, PermissionType, ScanStatus, User, UserRole
+from app.services.encryption_service import EncryptionService
+from app.services.malware_scan_service import MalwareScanService
+from app.services.rbac_service import RBACService
+from app.utils import sanitize_filename, validate_upload
+
+class DocumentService:
+    def __init__(self, db: Session):
+        self.db = db
+        self.rbac = RBACService(db)
+        self.scanner = MalwareScanService()
+        self.crypto = EncryptionService()
+
+    async def upload_document(self, user: User, case_id: int, file: UploadFile) -> Document:
+        """Upload document. Security: permission check, validation, malware scan, AES encryption, metadata only in DB."""
+        case = self.db.get(Case, case_id)
+        if not case:
+            raise HTTPException(status_code=404, detail="Case not found")
+        if not self.rbac.can_upload_to_case(user, case):
+            raise HTTPException(status_code=403, detail="You cannot upload to this case")
+        safe_name = sanitize_filename(file.filename or "uploaded_file")
+        data = await file.read()
+        validate_upload(safe_name, file.content_type, data)
+
+        scan = self.scanner.scan_file(data, safe_name)
+        if not scan.is_safe:
+            self.db.add(FileScanResult(filename=safe_name, scan_result=ScanStatus.BLOCKED.value, risk_score=scan.risk_score, scanner_message=scan.message))
+            self.db.commit()
+            raise HTTPException(status_code=400, detail="File rejected by malware scanner")
+
+        stored = f"{uuid.uuid4().hex}.bin"
+        path = self.crypto.encrypt_file(data, stored)
+        doc = Document(
+            case_id=case.id, uploaded_by_id=user.id, original_filename=safe_name,
+            stored_filename=stored, encrypted_file_path=str(path), file_hash=self.crypto.sha256(data),
+            mime_type=file.content_type, file_size=len(data), scan_status=ScanStatus.SAFE.value
+        )
+        self.db.add(doc); self.db.commit(); self.db.refresh(doc)
+        self.db.add(FileScanResult(document_id=doc.id, filename=safe_name, scan_result=ScanStatus.SAFE.value, risk_score=scan.risk_score, scanner_message=scan.message))
+        self._grant_defaults(doc, case, user)
+        self.db.commit(); self.db.refresh(doc)
+        return doc
+
+    def _grant_defaults(self, doc: Document, case: Case, uploader: User) -> None:
+        """Grant default ACL. Security: lawyer manages; client views/downloads; admin gets nothing."""
+        self._grant(doc.id, case.lawyer_id, case.lawyer_id, PermissionType.MANAGE.value)
+        self._grant(doc.id, case.client_id, case.lawyer_id, PermissionType.VIEW.value)
+        self._grant(doc.id, case.client_id, case.lawyer_id, PermissionType.DOWNLOAD.value)
+        if uploader.role != UserRole.ADMIN.value:
+            self._grant(doc.id, uploader.id, case.lawyer_id, PermissionType.VIEW.value)
+            self._grant(doc.id, uploader.id, case.lawyer_id, PermissionType.DOWNLOAD.value)
+
+    def _grant(self, document_id: int, user_id: int, granted_by_id: int, permission: str) -> DocumentAccess:
+        """Create ACL if missing. Security: document permissions are explicit rows."""
+        existing = self.db.query(DocumentAccess).filter_by(document_id=document_id, user_id=user_id, permission_type=permission).first()
+        if existing:
+            return existing
+        access = DocumentAccess(document_id=document_id, user_id=user_id, granted_by_id=granted_by_id, permission_type=permission)
+        self.db.add(access)
+        return access
+
+    def visible_documents(self, user: User) -> list[Document]:
+        """List documents visible to user. Security: admin sees no legal documents; ACL filters all others."""
+        if user.role == UserRole.ADMIN.value:
+            return []
+        return [doc for doc in self.db.query(Document).all() if self.rbac.can_access_document(user, doc)]
+
+    def authorized_document(self, user: User, document_id: int, permission: PermissionType = PermissionType.VIEW) -> Document:
+        """Fetch authorized document. Security: blocks IDOR by checking permission before returning metadata."""
+        doc = self.db.get(Document, document_id)
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found")
+        if not self.rbac.can_access_document(user, doc, permission):
+            raise HTTPException(status_code=403, detail="You do not have access to this document")
+        return doc
+
+    def decrypt_for_download(self, user: User, document_id: int) -> tuple[Document, bytes]:
+        """Decrypt for download. Security: decryption happens only after DOWNLOAD authorization."""
+        doc = self.authorized_document(user, document_id, PermissionType.DOWNLOAD)
+        return doc, self.crypto.decrypt_file(doc.encrypted_file_path)

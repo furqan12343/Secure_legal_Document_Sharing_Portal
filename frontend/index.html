@@ -1,0 +1,1750 @@
+﻿<!doctype html>
+<!--
+==============================================================================
+  Secure Legal Document Exchange Portal â€” Frontend (Single-File React App)
+==============================================================================
+  NUCES Islamabad â€” Secure Software Design â€” Assignment 3 â€” Spring 2026
+  Group 13, Section A:
+    - Furqan Haider  (23I-2123)
+    - Anum Ali       (23I-2089)
+    - Roshni Fawad   (23I-2107)
+
+  Single-file React app using CDN-loaded React + Babel + Tailwind.
+  No build step required â€” just open the file or serve the folder.
+
+  How to use:
+    1. Start backend (FastAPI on http://127.0.0.1:8000)
+    2. Either:
+        a) Open this file directly in a browser (file://)
+           â€” backend must allow CORS from "null" origin, OR
+        b) Serve this folder with: `python -m http.server 5173`
+           â€” then visit http://127.0.0.1:5173
+
+  All API calls go to API_BASE_URL (configurable below). The backend's
+  JWT/RBAC/AES/HMAC controls remain the single source of truth â€” this is
+  just a UI on top of those controls.
+==============================================================================
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Secure Legal Document Portal â€” Group 13</title>
+
+    <!-- React 18 (production builds, loaded from CDN) -->
+    <script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+
+    <!-- Babel: lets us write JSX directly in <script type="text/babel"> -->
+    <script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
+
+    <!-- Tailwind CDN (utility-first CSS, dev-grade â€” fine for a project demo) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- Inter font for a polished look -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+
+    <style>
+      html, body, #root { height: 100%; }
+      body { font-family: "Inter", system-ui, -apple-system, sans-serif; background: #f8fafc; }
+      /* Hide scrollbar nicely */
+      ::-webkit-scrollbar { width: 8px; height: 8px; }
+      ::-webkit-scrollbar-track { background: transparent; }
+      ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+      ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+    </style>
+
+    <script>
+      // Tailwind config â€” define our brand color palette
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              primary: {
+                50:  "#f0f4ff",
+                100: "#dbe5ff",
+                500: "#4f6df5",
+                600: "#3b56e0",
+                700: "#2f43b8",
+                800: "#283793",
+                900: "#1e2a6e",
+              },
+            },
+          },
+        },
+      };
+    </script>
+  </head>
+
+  <body>
+    <div id="root">
+      <!-- Loading splash shown while React boots -->
+      <div style="display:flex; align-items:center; justify-content:center; height:100vh; color:#64748b;">
+        Loading Secure Legal Portalâ€¦
+      </div>
+    </div>
+
+    <!--
+      MAIN APP CODE
+      Everything below is one self-contained React app.
+      Sections:
+        1. Configuration & API helpers
+        2. Type-like JSDoc constants (Role, PermissionType, etc.)
+        3. Auth context
+        4. Reusable UI components
+        5. Page components
+        6. Router + App root
+    -->
+    <script type="text/babel" data-type="module">
+      const { useState, useEffect, useContext, createContext, useCallback, useMemo } = React;
+
+      // ============================================================
+      // 1. CONFIGURATION & API HELPERS
+      // ============================================================
+
+      // Backend FastAPI base URL.
+      // If you change the backend port (config/.env PORT), update this too.
+      const API_BASE_URL = "http://127.0.0.1:8000";
+
+      const TOKEN_KEY = "slp_token";
+      const USER_KEY = "slp_user";
+
+      /**
+       * Centralized fetch wrapper.
+       * - Attaches JWT from localStorage to every request.
+       * - On 401, clears auth and redirects to login.
+       * - Returns parsed JSON; throws { error: string, status: number } on failure.
+       */
+      async function api(path, options = {}) {
+        const token = localStorage.getItem(TOKEN_KEY);
+        const headers = { ...(options.headers || {}) };
+
+        // Don't set Content-Type for FormData â€” browser handles boundary
+        if (!(options.body instanceof FormData) && !headers["Content-Type"]) {
+          headers["Content-Type"] = "application/json";
+        }
+        if (token) {
+          headers["Authorization"] = `Bearer ${token}`;
+        }
+
+        let response;
+        try {
+          response = await fetch(`${API_BASE_URL}${path}`, { ...options, headers });
+        } catch (networkErr) {
+          throw {
+            error: `Cannot reach backend?`,
+            status: 0,
+          };
+        }
+
+        // Handle 401 â€” token expired or invalid
+        if (response.status === 401 && token) {
+          localStorage.removeItem(TOKEN_KEY);
+          localStorage.removeItem(USER_KEY);
+          if (!window.location.hash.includes("login")) {
+            window.location.hash = "#/login?session_expired=1";
+          }
+        }
+
+        // For binary downloads (Blob), let caller handle response directly
+        if (options.responseType === "blob") {
+          if (!response.ok) {
+            const errBody = await response.json().catch(() => ({}));
+            throw { error: errBody.error || errBody.detail || "Download failed", status: response.status };
+          }
+          return response;
+        }
+
+        // Try to parse JSON body either way (for error details)
+        let data;
+        try {
+          data = await response.json();
+        } catch {
+          data = {};
+        }
+
+        if (!response.ok) {
+          throw {
+            error: data.error || data.detail || `HTTP ${response.status}`,
+            status: response.status,
+            details: data.details,
+          };
+        }
+        return data;
+      }
+
+      function saveAuth(token, user) {
+        localStorage.setItem(TOKEN_KEY, token);
+        localStorage.setItem(USER_KEY, JSON.stringify(user));
+      }
+      function clearAuth() {
+        localStorage.removeItem(TOKEN_KEY);
+        localStorage.removeItem(USER_KEY);
+      }
+      function getStoredUser() {
+        try {
+          return JSON.parse(localStorage.getItem(USER_KEY));
+        } catch {
+          return null;
+        }
+      }
+
+      // ============================================================
+      // 2. CONSTANTS (mirror src/utils/constants.py)
+      // ============================================================
+
+      const Role = { LAWYER: "LAWYER", CLIENT: "CLIENT", ASSISTANT: "ASSISTANT", ADMIN: "ADMIN" };
+      const PermissionType = { VIEW: "VIEW", DOWNLOAD: "DOWNLOAD", SHARE: "SHARE" };
+
+      // ============================================================
+      // 3. AUTH CONTEXT
+      // ============================================================
+
+      const AuthContext = createContext(null);
+
+      function AuthProvider({ children }) {
+        const [user, setUser] = useState(() => getStoredUser());
+        const [loading, setLoading] = useState(false);
+
+        const login = useCallback(async (email, password) => {
+          // POST /auth/login (Scenarios 1/2/4)
+          const data = await api("/auth/login", {
+            method: "POST",
+            body: JSON.stringify({ email, password }),
+          });
+          const u = { user_id: data.user_id, email: data.email, role: data.role };
+          saveAuth(data.access_token, u);
+          setUser(u);
+          // Role-aware redirect: admin â†’ /admin, others â†’ /dashboard (FR11)
+          window.location.hash = u.role === Role.ADMIN ? "#/admin" : "#/dashboard";
+        }, []);
+
+        const logout = useCallback(async () => {
+          // Best-effort revoke on server (State Chart â†’ SESSION_TERMINATED)
+          try { await api("/auth/logout", { method: "POST" }); } catch {}
+          clearAuth();
+          setUser(null);
+          window.location.hash = "#/login";
+        }, []);
+
+        const value = useMemo(
+          () => ({ user, isAuthenticated: !!user, loading, login, logout }),
+          [user, loading, login, logout]
+        );
+        return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+      }
+      function useAuth() { return useContext(AuthContext); }
+
+      // ============================================================
+      // 4. REUSABLE UI COMPONENTS
+      // ============================================================
+
+      // Inline SVG icons (no external library â€” keeps this file self-contained)
+      const Icon = {
+        Shield: (p) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>,
+        Files:  (p) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z"/><polyline points="14 2 14 8 20 8"/></svg>,
+        Inbox:  (p) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>,
+        Users:  (p) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
+        ShieldCheck: (p) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>,
+        User:   (p) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>,
+        Dashboard: (p) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>,
+        LogOut: (p) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>,
+        Upload: (p) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>,
+        Download: (p) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>,
+        Share:  (p) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>,
+        Trash:  (p) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>,
+        Key:    (p) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/></svg>,
+        Check:  (p) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><polyline points="20 6 9 17 4 12"/></svg>,
+        X:      (p) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>,
+        Eye:    (p) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>,
+        EyeOff: (p) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>,
+        Activity: (p) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>,
+        Refresh: (p) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>,
+        AlertCircle: (p) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>,
+        CheckCircle: (p) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...p}><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>,
+      };
+
+      function Spinner({ size = 20 }) {
+        return (
+          <svg className="animate-spin text-primary-600" width={size} height={size} viewBox="0 0 24 24" fill="none">
+            <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" strokeOpacity="0.2"/>
+            <path d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" strokeWidth="3" strokeLinecap="round"/>
+          </svg>
+        );
+      }
+
+      function PageLoader() {
+        return <div className="flex min-h-[60vh] items-center justify-center"><Spinner size={32}/></div>;
+      }
+
+      function Banner({ type, message, onDismiss }) {
+        const cls = type === "success"
+          ? "border-emerald-300 bg-emerald-50 text-emerald-800"
+          : "border-red-300 bg-red-50 text-red-800";
+        const I = type === "success" ? Icon.CheckCircle : Icon.AlertCircle;
+        return (
+          <div className={`flex items-start gap-3 rounded-lg border p-3 text-sm ${cls}`} role="alert">
+            <I width={18} height={18} className="mt-0.5 flex-shrink-0"/>
+            <p className="flex-1">{message}</p>
+            {onDismiss && (
+              <button onClick={onDismiss} className="text-xs font-medium opacity-70 underline hover:opacity-100">dismiss</button>
+            )}
+          </div>
+        );
+      }
+
+      function EmptyState({ title, description, action }) {
+        return (
+          <div className="flex flex-col items-center justify-center rounded-lg border-2 border-dashed border-slate-200 bg-white p-12 text-center">
+            <Icon.Files width={40} height={40} className="mb-3 text-slate-400"/>
+            <h3 className="mb-1 text-sm font-semibold text-slate-700">{title}</h3>
+            {description && <p className="mb-4 max-w-sm text-sm text-slate-500">{description}</p>}
+            {action}
+          </div>
+        );
+      }
+
+      function RoleBadge({ role }) {
+        const colors = {
+          LAWYER: "bg-primary-100 text-primary-800",
+          CLIENT: "bg-amber-100 text-amber-800",
+          ASSISTANT: "bg-cyan-100 text-cyan-800",
+          ADMIN: "bg-rose-100 text-rose-800",
+        };
+        return <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${colors[role] || "bg-slate-100 text-slate-700"}`}>{role}</span>;
+      }
+
+      function StatusBadge({ status }) {
+        const map = {
+          CLEAN: "bg-emerald-100 text-emerald-800",
+          PENDING: "bg-amber-100 text-amber-800",
+          MALICIOUS: "bg-red-100 text-red-800",
+          SCAN_FAILED: "bg-slate-100 text-slate-700",
+        };
+        return <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${map[status] || "bg-slate-100 text-slate-700"}`}>{status}</span>;
+      }
+
+      function Modal({ title, children, onClose }) {
+        useEffect(() => {
+          const onEsc = (e) => { if (e.key === "Escape") onClose(); };
+          document.addEventListener("keydown", onEsc);
+          return () => document.removeEventListener("keydown", onEsc);
+        }, [onClose]);
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4" role="dialog" aria-modal="true">
+            <div className="w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
+              <div className="mb-4 flex items-start justify-between gap-3">
+                <h3 className="text-lg font-semibold text-slate-900">{title}</h3>
+                <button onClick={onClose} className="rounded-md p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600" aria-label="Close">
+                  <Icon.X width={18} height={18}/>
+                </button>
+              </div>
+              {children}
+            </div>
+          </div>
+        );
+      }
+
+      // Reusable Tailwind classes
+      const cls = {
+        btnPrimary: "inline-flex items-center justify-center gap-2 rounded-lg bg-primary-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition-colors hover:bg-primary-700 disabled:cursor-not-allowed disabled:bg-slate-300",
+        btnSecondary: "inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 shadow-sm transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50",
+        btnDanger: "inline-flex items-center justify-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:bg-slate-300",
+        input: "block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 shadow-sm focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500 disabled:cursor-not-allowed disabled:bg-slate-100",
+        label: "mb-1 block text-sm font-medium text-slate-700",
+        card: "rounded-xl border border-slate-200 bg-white p-6 shadow-sm",
+      };
+
+      // --- Format helpers ---
+      function formatBytes(bytes) {
+        if (bytes < 1024) return `${bytes} B`;
+        if (bytes < 1024 * 1024) return `${(bytes/1024).toFixed(1)} KB`;
+        return `${(bytes/(1024*1024)).toFixed(1)} MB`;
+      }
+      function formatDate(iso) {
+        if (!iso) return "â€”";
+        try {
+          return new Date(iso).toLocaleString("en-GB", {
+            year:"numeric", month:"short", day:"numeric", hour:"2-digit", minute:"2-digit"
+          });
+        } catch { return iso; }
+      }
+
+      // ============================================================
+      // 5. PAGES
+      // ============================================================
+
+      // --- Login (Scenarios 1/2/4) ---
+      function LoginPage() {
+        const { login } = useAuth();
+        const [email, setEmail] = useState("");
+        const [password, setPassword] = useState("");
+        const [showPwd, setShowPwd] = useState(false);
+        const [error, setError] = useState(null);
+        const [submitting, setSubmitting] = useState(false);
+
+        const sessionExpired = window.location.hash.includes("session_expired");
+
+        async function onSubmit(e) {
+          e.preventDefault();
+          setError(null);
+          setSubmitting(true);
+          try {
+            await login(email, password);
+          } catch (err) {
+            console.error("Login attempt failed", err);
+            setError(err.error || "Invalid email or password. Please try again.");
+          } finally {
+            setSubmitting(false);
+          }
+        }
+
+        return (
+          <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-slate-50 to-primary-50 p-4">
+            <div className="w-full max-w-md">
+              <div className="mb-8 flex flex-col items-center">
+                <div className="mb-3 rounded-2xl bg-primary-600 p-3 shadow-lg">
+                  <Icon.Shield width={28} height={28} className="text-white"/>
+                </div>
+                <h1 className="text-2xl font-bold text-slate-900">Legal Document Portal</h1>
+                <p className="mt-1 text-sm text-slate-600">Secure access for law firms</p>
+              </div>
+
+              <div className={cls.card}>
+                <h2 className="mb-1 text-lg font-semibold text-slate-900">Sign in</h2>
+                <p className="mb-6 text-sm text-slate-600">Enter your credentials to continue</p>
+
+                {sessionExpired && !error && (
+                  <div className="mb-4"><Banner type="error" message="Your session expired. Please sign in again."/></div>
+                )}
+                {error && <div className="mb-4"><Banner type="error" message={error}/></div>}
+
+                <form onSubmit={onSubmit} className="space-y-4" noValidate>
+                  <div>
+                    <label className={cls.label}>Email</label>
+                    <input type="email" required autoComplete="email" value={email}
+                      onChange={(e)=>setEmail(e.target.value)} className={cls.input}
+                      placeholder="you@example.com" disabled={submitting}/>
+                  </div>
+                  <div>
+                    <label className={cls.label}>Password</label>
+                    <div className="relative">
+                      <input type={showPwd ? "text" : "password"} required autoComplete="current-password"
+                        value={password} onChange={(e)=>setPassword(e.target.value)}
+                        className={`${cls.input} pr-10`} disabled={submitting}/>
+                      <button type="button" onClick={()=>setShowPwd(!showPwd)} tabIndex={-1}
+                        aria-label={showPwd ? "Hide" : "Show"}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-slate-400 hover:text-slate-600">
+                        {showPwd ? <Icon.EyeOff width={16} height={16}/> : <Icon.Eye width={16} height={16}/>}
+                      </button>
+                    </div>
+                  </div>
+                  <button type="submit" disabled={submitting || !email || !password} className={`${cls.btnPrimary} w-full`}>
+                    {submitting && <Spinner size={16}/>}
+                    {submitting ? "Signing inâ€¦" : "Sign in"}
+                  </button>
+                </form>
+
+                <div className="mt-4 text-center text-sm text-slate-600">
+                  Don't have an account?{" "}
+                  <a href="#/register" className="font-medium text-primary-600 hover:text-primary-700">Register</a>
+                </div>
+              </div>
+
+            </div>
+          </div>
+        );
+      }
+
+      // --- Register (Scenario 3) ---
+      function RegisterPage() {
+        const [form, setForm] = useState({ full_name:"", email:"", password:"", confirm:"", role: Role.CLIENT });
+        const [error, setError] = useState(null);
+        const [success, setSuccess] = useState(false);
+        const [submitting, setSubmitting] = useState(false);
+
+        const checks = {
+          length: form.password.length >= 8,
+          upper: /[A-Z]/.test(form.password),
+          lower: /[a-z]/.test(form.password),
+          digit: /[0-9]/.test(form.password),
+        };
+        const allOk = checks.length && checks.upper && checks.lower && checks.digit;
+        const matches = form.password === form.confirm;
+
+        async function onSubmit(e) {
+          e.preventDefault();
+          setError(null);
+          if (!allOk)   return setError("Password does not meet strength requirements");
+          if (!matches) return setError("Passwords do not match");
+          setSubmitting(true);
+          try {
+            await api("/auth/register", {
+              method: "POST",
+              body: JSON.stringify({
+                email: form.email, password: form.password,
+                full_name: form.full_name, role: form.role,
+              }),
+            });
+            setSuccess(true);
+            setTimeout(() => { window.location.hash = "#/login"; }, 1500);
+          } catch (err) {
+            setError(err.error);
+          } finally {
+            setSubmitting(false);
+          }
+        }
+
+        const upd = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+
+        return (
+          <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-slate-50 to-primary-50 p-4">
+            <div className="w-full max-w-md">
+              <div className="mb-8 flex flex-col items-center">
+                <div className="mb-3 rounded-2xl bg-primary-600 p-3 shadow-lg"><Icon.Shield width={28} height={28} className="text-white"/></div>
+                <h1 className="text-2xl font-bold text-slate-900">Create account</h1>
+              </div>
+
+              <div className={cls.card}>
+                {success ? (
+                  <Banner type="success" message="Registration successful! Redirecting to sign inâ€¦"/>
+                ) : (
+                  <>
+                    {error && <div className="mb-4"><Banner type="error" message={error}/></div>}
+                    <form onSubmit={onSubmit} className="space-y-4" noValidate>
+                      <div>
+                        <label className={cls.label}>Full name</label>
+                        <input type="text" required minLength={2} maxLength={100}
+                          value={form.full_name} onChange={upd("full_name")} className={cls.input} disabled={submitting}/>
+                      </div>
+                      <div>
+                        <label className={cls.label}>Email</label>
+                        <input type="email" required value={form.email} onChange={upd("email")}
+                          className={cls.input} disabled={submitting}/>
+                      </div>
+                      <div>
+                        <label className={cls.label}>Role</label>
+                        <select required value={form.role} onChange={upd("role")} className={cls.input} disabled={submitting}>
+                          <option value={Role.LAWYER}>Lawyer</option>
+                          <option value={Role.CLIENT}>Client</option>
+                          <option value={Role.ASSISTANT}>Assistant</option>
+                          <option value={Role.ADMIN}>Admin</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className={cls.label}>Password</label>
+                        <input type="password" required minLength={8} maxLength={72}
+                          value={form.password} onChange={upd("password")} className={cls.input} disabled={submitting}/>
+                        {form.password && (
+                          <ul className="mt-2 space-y-0.5 text-xs">
+                            <li className={checks.length ? "text-emerald-600" : "text-slate-500"}>{checks.length ? "âœ“" : "â—‹"} â‰¥ 8 characters</li>
+                            <li className={checks.upper  ? "text-emerald-600" : "text-slate-500"}>{checks.upper  ? "âœ“" : "â—‹"} Uppercase letter</li>
+                            <li className={checks.lower  ? "text-emerald-600" : "text-slate-500"}>{checks.lower  ? "âœ“" : "â—‹"} Lowercase letter</li>
+                            <li className={checks.digit  ? "text-emerald-600" : "text-slate-500"}>{checks.digit  ? "âœ“" : "â—‹"} At least one digit</li>
+                          </ul>
+                        )}
+                      </div>
+                      <div>
+                        <label className={cls.label}>Confirm password</label>
+                        <input type="password" required value={form.confirm} onChange={upd("confirm")}
+                          className={cls.input} disabled={submitting}/>
+                        {form.confirm && !matches && <p className="mt-1 text-xs text-red-600">Passwords do not match</p>}
+                      </div>
+                      <button type="submit" disabled={submitting || !form.full_name || !form.email || !allOk || !matches}
+                        className={`${cls.btnPrimary} w-full`}>
+                        {submitting && <Spinner size={16}/>}
+                        {submitting ? "Creatingâ€¦" : "Create account"}
+                      </button>
+                    </form>
+                    <div className="mt-4 text-center text-sm text-slate-600">
+                      Already have an account?{" "}
+                      <a href="#/login" className="font-medium text-primary-600 hover:text-primary-700">Sign in</a>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      // --- App layout (sidebar + nav) ---
+      function AppLayout({ children, currentRoute }) {
+        const { user, logout } = useAuth();
+        if (!user) return null;
+
+        const navItems = [
+          // Document side (FR11: no admin)
+          { to:"#/dashboard", label:"Dashboard", icon: Icon.Dashboard, roles:[Role.LAWYER, Role.CLIENT, Role.ASSISTANT] },
+          { to:"#/documents", label:"Documents", icon: Icon.Files,     roles:[Role.LAWYER, Role.CLIENT, Role.ASSISTANT] },
+          { to:"#/requests",  label:"Requests",  icon: Icon.Inbox,     roles:[Role.LAWYER, Role.ASSISTANT] },
+          // Admin side (separation of duties)
+          { to:"#/admin",       label:"User Management", icon: Icon.Users,       roles:[Role.ADMIN] },
+          { to:"#/admin/audit", label:"Audit Integrity", icon: Icon.ShieldCheck, roles:[Role.ADMIN] },
+          // Self-service
+          { to:"#/profile", label:"Profile", icon: Icon.User, roles:[Role.LAWYER, Role.CLIENT, Role.ASSISTANT, Role.ADMIN] },
+        ].filter(n => n.roles.includes(user.role));
+
+        return (
+          <div className="flex min-h-screen bg-slate-50">
+            <aside className="hidden w-64 flex-col border-r border-slate-200 bg-white md:flex">
+              <div className="flex h-16 items-center gap-2 border-b border-slate-200 px-6">
+                <Icon.Shield width={24} height={24} className="text-primary-600"/>
+                <span className="font-semibold text-slate-800">Legal Portal</span>
+              </div>
+              <nav className="flex-1 space-y-1 p-4">
+                {navItems.map((it) => {
+                  const I = it.icon;
+                  const active = currentRoute.startsWith(it.to.replace("#",""));
+                  return (
+                    <a key={it.to} href={it.to}
+                      className={`flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
+                        active ? "bg-primary-50 text-primary-700" : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+                      }`}>
+                      <I width={18} height={18}/>{it.label}
+                    </a>
+                  );
+                })}
+              </nav>
+              <div className="border-t border-slate-200 p-4">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <span className="truncate text-sm font-medium text-slate-700">{user.email}</span>
+                  <RoleBadge role={user.role}/>
+                </div>
+                <button onClick={logout} className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-slate-600 hover:bg-slate-100 hover:text-slate-900">
+                  <Icon.LogOut width={16} height={16}/>Sign out
+                </button>
+              </div>
+            </aside>
+
+            <div className="flex flex-1 flex-col overflow-hidden">
+              <header className="flex h-16 items-center justify-between border-b border-slate-200 bg-white px-4 md:hidden">
+                <div className="flex items-center gap-2">
+                  <Icon.Shield width={22} height={22} className="text-primary-600"/>
+                  <span className="font-semibold">Legal Portal</span>
+                </div>
+                <button onClick={logout} className="rounded-lg p-2 text-slate-600 hover:bg-slate-100" aria-label="Sign out">
+                  <Icon.LogOut width={18} height={18}/>
+                </button>
+              </header>
+              <nav className="order-last flex justify-around border-t border-slate-200 bg-white py-2 md:hidden">
+                {navItems.slice(0,4).map((it) => {
+                  const I = it.icon;
+                  const active = currentRoute.startsWith(it.to.replace("#",""));
+                  return (
+                    <a key={it.to} href={it.to}
+                      className={`flex flex-col items-center gap-0.5 px-2 py-1 text-xs ${active ? "text-primary-700" : "text-slate-500"}`}>
+                      <I width={18} height={18}/>{it.label}
+                    </a>
+                  );
+                })}
+              </nav>
+              <main className="flex-1 overflow-y-auto p-4 md:p-8">{children}</main>
+            </div>
+          </div>
+        );
+      }
+
+      // --- Dashboard ---
+      function DashboardPage() {
+        const { user } = useAuth();
+        const [docs, setDocs] = useState([]);
+        const [pending, setPending] = useState(0);
+        const [loading, setLoading] = useState(true);
+        const [error, setError] = useState(null);
+
+        useEffect(() => {
+          let cancelled = false;
+          (async () => {
+            try {
+              const data = await api("/documents/");
+              if (!cancelled) setDocs(data.documents || []);
+              if (user.role === Role.LAWYER) {
+                try {
+                  const pd = await api("/sharing/pending");
+                  if (!cancelled) setPending(pd.requests?.length ?? 0);
+                } catch {}
+              }
+            } catch (err) {
+              if (!cancelled) setError(err.error);
+            } finally {
+              if (!cancelled) setLoading(false);
+            }
+          })();
+          return () => { cancelled = true; };
+        }, [user.role]);
+
+        if (loading) return <PageLoader/>;
+
+        const owned = docs.filter(d => d.owner_id === user.user_id);
+        const shared = docs.filter(d => d.owner_id !== user.user_id);
+        const recent = [...docs].sort((a,b) => new Date(b.uploaded_at) - new Date(a.uploaded_at)).slice(0,5);
+
+        return (
+          <div className="space-y-6">
+            <div>
+              <h1 className="text-2xl font-bold text-slate-900">Welcome back, {user.email}</h1>
+              <p className="text-sm text-slate-600">Here's an overview of your documents and activity.</p>
+            </div>
+            {error && <Banner type="error" message={error}/>}
+
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              <StatCard icon={Icon.Files} label={user.role === Role.ASSISTANT ? "Shared with me" : "My documents"}
+                value={user.role === Role.ASSISTANT ? shared.length : owned.length}/>
+              <StatCard icon={Icon.ShieldCheck} label="Total accessible" value={docs.length}/>
+              {user.role === Role.LAWYER && <StatCard icon={Icon.Inbox} label="Pending requests" value={pending} highlight={pending>0}/>}
+              {(user.role === Role.LAWYER || user.role === Role.CLIENT) &&
+                <StatCard icon={Icon.Upload} label="Quick action" value="Upload" href="#/documents"/>}
+            </div>
+
+            <div className={cls.card}>
+              <div className="mb-4 flex items-center justify-between">
+                <h2 className="text-lg font-semibold text-slate-900">Recent documents</h2>
+                <a href="#/documents" className="text-sm font-medium text-primary-600 hover:text-primary-700">View all â†’</a>
+              </div>
+              {recent.length === 0 ? (
+                <EmptyState title="No documents yet"
+                  description={user.role === Role.ASSISTANT ? "Documents shared with you will appear here." : "Upload your first document to get started."}
+                  action={user.role !== Role.ASSISTANT && <a href="#/documents" className={cls.btnPrimary}><Icon.Upload width={16} height={16}/>Upload</a>}/>
+              ) : (
+                <div className="overflow-hidden rounded-lg border border-slate-200">
+                  <table className="min-w-full divide-y divide-slate-200">
+                    <thead className="bg-slate-50">
+                      <tr>
+                        <Th>File</Th><Th>Size</Th><Th>Status</Th><Th>Uploaded</Th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200 bg-white">
+                      {recent.map(d => (
+                        <tr key={d.id}>
+                          <Td className="font-medium">{d.original_filename}</Td>
+                          <Td>{formatBytes(d.file_size)}</Td>
+                          <Td><StatusBadge status={d.malware_scan_status}/></Td>
+                          <Td>{formatDate(d.uploaded_at)}</Td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      }
+
+      function StatCard({ icon: I, label, value, href, highlight }) {
+        const inner = (
+          <div className={`${cls.card} flex items-center gap-4 ${href ? "cursor-pointer hover:shadow-md" : ""} ${highlight ? "ring-2 ring-amber-300" : ""}`}>
+            <div className={`rounded-lg p-3 ${highlight ? "bg-amber-100 text-amber-700" : "bg-primary-50 text-primary-600"}`}>
+              <I width={20} height={20}/>
+            </div>
+            <div>
+              <p className="text-xs font-medium uppercase tracking-wide text-slate-500">{label}</p>
+              <p className="text-2xl font-bold text-slate-900">{value}</p>
+            </div>
+          </div>
+        );
+        return href ? <a href={href}>{inner}</a> : inner;
+      }
+      function Th({ children }) { return <th className="px-4 py-2 text-left text-xs font-medium uppercase tracking-wide text-slate-500">{children}</th>; }
+      function Td({ children, className = "" }) { return <td className={`px-4 py-3 text-sm text-slate-700 ${className}`}>{children}</td>; }
+
+      // --- Documents page (Scenarios 1, 2, 4 in one page) ---
+      function DocumentsPage() {
+        const { user } = useAuth();
+        const [docs, setDocs] = useState([]);
+        const [loading, setLoading] = useState(true);
+        const [error, setError] = useState(null);
+        const [success, setSuccess] = useState(null);
+        const [shareTarget, setShareTarget] = useState(null);
+        const [requestTarget, setRequestTarget] = useState(null);
+
+        const refresh = useCallback(async () => {
+          setLoading(true); setError(null);
+          try {
+            const data = await api("/documents/");
+            setDocs(data.documents || []);
+          } catch (err) {
+            setError(err.error);
+          } finally {
+            setLoading(false);
+          }
+        }, []);
+
+        useEffect(() => { refresh(); }, [refresh]);
+
+        async function onDownload(doc) {
+          try {
+            const response = await api(`/documents/${doc.id}/download`, { responseType: "blob" });
+            // Trigger browser download
+            const blob = await response.blob();
+            const disposition = response.headers.get("content-disposition") || "";
+            const m = /filename="?([^"]+)"?/.exec(disposition);
+            const filename = m ? m[1] : doc.original_filename;
+            const url = window.URL.createObjectURL(blob);
+            const link = document.createElement("a");
+            link.href = url; link.download = filename;
+            document.body.appendChild(link); link.click(); link.remove();
+            window.URL.revokeObjectURL(url);
+            setSuccess(`Downloaded ${filename}`);
+          } catch (err) {
+            setError(err.error);
+          }
+        }
+        async function onDelete(doc) {
+          if (!confirm(`Delete "${doc.original_filename}"? This is a soft delete â€” audit trail is preserved.`)) return;
+          try {
+            await api(`/documents/${doc.id}`, { method: "DELETE" });
+            setSuccess("Document deleted");
+            refresh();
+          } catch (err) {
+            setError(err.error);
+          }
+        }
+
+        if (loading) return <PageLoader/>;
+
+        const canUpload = user.role === Role.LAWYER || user.role === Role.CLIENT;
+        const canShare = user.role === Role.LAWYER;
+        const canRequest = user.role === Role.ASSISTANT;
+
+        return (
+          <div className="space-y-6">
+            <div>
+              <h1 className="text-2xl font-bold text-slate-900">Documents</h1>
+              <p className="text-sm text-slate-600">Files are AES-256-GCM encrypted at rest. Every access is logged with HMAC-signed audit entries.</p>
+            </div>
+            {error && <Banner type="error" message={error} onDismiss={() => setError(null)}/>}
+            {success && <Banner type="success" message={success} onDismiss={() => setSuccess(null)}/>}
+
+            {canUpload && <UploadCard onDone={(m) => { setSuccess(m); refresh(); }} onError={setError}/>}
+
+            {docs.length === 0 ? (
+              <EmptyState title="No documents" description={canUpload ? "Upload your first document above." : "No documents shared with you yet."}/>
+            ) : (
+              <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
+                <table className="min-w-full divide-y divide-slate-200">
+                  <thead className="bg-slate-50">
+                    <tr>
+                      <Th>File</Th><Th>Size</Th><Th>Status</Th><Th>Uploaded</Th>
+                      <th className="px-4 py-3 text-right text-xs font-medium uppercase tracking-wide text-slate-500">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200 bg-white">
+                    {docs.map(doc => {
+                      const isOwner = doc.owner_id === user.user_id;
+                      return (
+                        <tr key={doc.id} className="hover:bg-slate-50">
+                          <Td>
+                            <div className="font-medium text-slate-900">{doc.original_filename}</div>
+                            {doc.case_id && <div className="text-xs text-slate-500">Case: {doc.case_id}</div>}
+                            {!isOwner && <div className="text-xs text-slate-400">Shared</div>}
+                          </Td>
+                          <Td>{formatBytes(doc.file_size)}</Td>
+                          <Td><StatusBadge status={doc.malware_scan_status}/></Td>
+                          <Td>{formatDate(doc.uploaded_at)}</Td>
+                          <td className="px-4 py-3">
+                            <div className="flex justify-end gap-1">
+                              <IconBtn title="Download" onClick={() => onDownload(doc)}><Icon.Download width={16} height={16}/></IconBtn>
+                              {canShare && isOwner && <IconBtn title="Share" onClick={() => setShareTarget(doc)}><Icon.Share width={16} height={16}/></IconBtn>}
+                              {canRequest && !isOwner && <IconBtn title="Request additional permission" onClick={() => setRequestTarget(doc)}><Icon.Key width={16} height={16}/></IconBtn>}
+                              {isOwner && <IconBtn title="Delete" danger onClick={() => onDelete(doc)}><Icon.Trash width={16} height={16}/></IconBtn>}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {shareTarget && <ShareModal doc={shareTarget} onClose={() => setShareTarget(null)} onDone={(m) => { setShareTarget(null); setSuccess(m); }} onError={setError}/>}
+            {requestTarget && <RequestModal doc={requestTarget} onClose={() => setRequestTarget(null)} onDone={(m) => { setRequestTarget(null); setSuccess(m); }} onError={setError}/>}
+          </div>
+        );
+      }
+
+      function IconBtn({ children, title, onClick, danger }) {
+        return (
+          <button type="button" onClick={onClick} title={title} aria-label={title}
+            className={`rounded-md p-1.5 ${danger ? "text-red-600 hover:bg-red-50" : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"}`}>
+            {children}
+          </button>
+        );
+      }
+
+      function UploadCard({ onDone, onError }) {
+        const { user } = useAuth();
+        const [file, setFile] = useState(null);
+        const [caseId, setCaseId] = useState("");
+        const [description, setDescription] = useState("");
+        const [lawyers, setLawyers] = useState([]);
+        const [selectedLawyerEmail, setSelectedLawyerEmail] = useState("");
+        const [loadingLawyers, setLoadingLawyers] = useState(false);
+        const [submitting, setSubmitting] = useState(false);
+
+        useEffect(() => {
+          let cancelled = false;
+          if (user?.role !== Role.CLIENT) return;
+          setLoadingLawyers(true);
+          api("/users/lawyers")
+            .then((data) => {
+              if (!cancelled) {
+                const list = data.lawyers || [];
+                setLawyers(list);
+                if (list.length > 0 && !selectedLawyerEmail) {
+                  setSelectedLawyerEmail(list[0].email);
+                }
+              }
+            })
+            .catch((err) => onError(err.error || "Could not load lawyers"))
+            .finally(() => { if (!cancelled) setLoadingLawyers(false); });
+          return () => { cancelled = true; };
+        }, [user?.role]);
+
+        async function onSubmit(e) {
+          e.preventDefault();
+          if (!file) return;
+          if (user?.role === Role.CLIENT && !selectedLawyerEmail) {
+            return onError("Create at least one lawyer account first, then select the lawyer for this upload.");
+          }
+          setSubmitting(true);
+          try {
+            const fd = new FormData();
+            fd.append("file", file);
+
+            // For clients, case_id carries the selected lawyer email.
+            // Backend maps that email to the correct lawyer and links the document to that lawyer-client case.
+            if (user?.role === Role.CLIENT) {
+              fd.append("case_id", selectedLawyerEmail);
+            } else if (caseId) {
+              fd.append("case_id", caseId);
+            }
+
+            if (description) fd.append("description", description);
+            await api("/documents/upload", { method: "POST", body: fd });
+            onDone(`Uploaded ${file.name}`);
+            setFile(null); setCaseId(""); setDescription("");
+            const input = document.getElementById("file-input"); if (input) input.value = "";
+          } catch (err) {
+            onError(err.error);
+          } finally {
+            setSubmitting(false);
+          }
+        }
+
+        return (
+          <div className={cls.card}>
+            <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-slate-900">
+              <Icon.Upload width={18} height={18}/>Upload document
+            </h2>
+            <form onSubmit={onSubmit} className="space-y-4">
+              <div className="grid gap-4 md:grid-cols-2">
+                <div>
+                  <label className={cls.label}>File</label>
+                  <input id="file-input" type="file" required accept=".pdf,.docx,.doc,.jpg,.jpeg,.png,.txt"
+                    onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+                    className={`${cls.input} file:mr-3 file:rounded file:border-0 file:bg-primary-50 file:px-3 file:py-1 file:text-sm file:font-medium file:text-primary-700`}
+                    disabled={submitting}/>
+                  <p className="mt-1 text-xs text-slate-500">Max 50MB. PDF/DOCX/DOC/JPG/PNG/TXT. Malware-scanned and AES-256-GCM encrypted before storage.</p>
+                </div>
+
+                {user?.role === Role.CLIENT ? (
+                  <div>
+                    <label className={cls.label}>Send document to lawyer</label>
+                    <select required value={selectedLawyerEmail} onChange={(e) => setSelectedLawyerEmail(e.target.value)}
+                      className={cls.input} disabled={submitting || loadingLawyers}>
+                      {lawyers.length === 0 && <option value="">No lawyer accounts found</option>}
+                      {lawyers.map((lawyer) => (
+                        <option key={lawyer.id} value={lawyer.email}>
+                          {lawyer.full_name || lawyer.name || lawyer.email} â€” {lawyer.email}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="mt-1 text-xs text-slate-500">The selected lawyer will see this upload in their Documents page after the secure scan/encryption step succeeds.</p>
+                  </div>
+                ) : (
+                  <div>
+                    <label className={cls.label}>Client email or Case ID (optional)</label>
+                    <input type="text" value={caseId} onChange={(e) => setCaseId(e.target.value)}
+                      className={cls.input} placeholder="client@example.com or numeric case ID" disabled={submitting} maxLength={255}/>
+                    <p className="mt-1 text-xs text-slate-500">For lawyer uploads, enter a client email to link the document to that client.</p>
+                  </div>
+                )}
+              </div>
+              <div>
+                <label className={cls.label}>Description (optional)</label>
+                <input type="text" value={description} onChange={(e) => setDescription(e.target.value)}
+                  className={cls.input} disabled={submitting} maxLength={500}/>
+              </div>
+              <button type="submit" disabled={submitting || !file || (user?.role === Role.CLIENT && !selectedLawyerEmail)} className={cls.btnPrimary}>
+                {submitting && <Spinner size={16}/>}
+                {submitting ? "Uploadingâ€¦" : "Upload"}
+              </button>
+            </form>
+          </div>
+        );
+      }
+      function ShareModal({ doc, onClose, onDone, onError }) {
+        const [granteeEmail, setGranteeEmail] = useState("");
+        const [permissionType, setPermissionType] = useState(PermissionType.DOWNLOAD);
+        const [expires, setExpires] = useState("");
+        const [submitting, setSubmitting] = useState(false);
+
+        async function onSubmit(e) {
+          e.preventDefault();
+          setSubmitting(true);
+          try {
+            await api("/sharing/grant", {
+              method: "POST",
+              body: JSON.stringify({
+                document_id: doc.id, grantee_email: granteeEmail,
+                permission_type: permissionType,
+                expires_in_days: expires === "" ? null : Number(expires),
+              }),
+            });
+            onDone(`Shared with ${granteeEmail}`);
+          } catch (err) {
+            onError(err.error);
+          } finally {
+            setSubmitting(false);
+          }
+        }
+
+        return (
+          <Modal title={`Share "${doc.original_filename}"`} onClose={onClose}>
+            <form onSubmit={onSubmit} className="space-y-4">
+              <div>
+                <label className={cls.label}>Recipient email</label>
+                <input type="email" required value={granteeEmail} onChange={(e) => setGranteeEmail(e.target.value)}
+                  className={cls.input} placeholder="recipient@example.com" disabled={submitting}/>
+                <p className="mt-1 text-xs text-slate-500">Cannot share with admin accounts (separation of duties â€” FR11).</p>
+              </div>
+              <div>
+                <label className={cls.label}>Permission type</label>
+                <select value={permissionType} onChange={(e) => setPermissionType(e.target.value)} className={cls.input} disabled={submitting}>
+                  <option value={PermissionType.VIEW}>View only</option>
+                  <option value={PermissionType.DOWNLOAD}>Download</option>
+                  <option value={PermissionType.SHARE}>Share (re-grant)</option>
+                </select>
+              </div>
+              <div>
+                <label className={cls.label}>Expires in (days, optional)</label>
+                <input type="number" min={1} max={365} value={expires}
+                  onChange={(e) => setExpires(e.target.value === "" ? "" : Number(e.target.value))}
+                  className={cls.input} placeholder="Never expires" disabled={submitting}/>
+              </div>
+              <div className="flex justify-end gap-2 pt-2">
+                <button type="button" onClick={onClose} className={cls.btnSecondary} disabled={submitting}>Cancel</button>
+                <button type="submit" className={cls.btnPrimary} disabled={submitting}>
+                  {submitting && <Spinner size={16}/>}Grant access
+                </button>
+              </div>
+            </form>
+          </Modal>
+        );
+      }
+
+      function RequestModal({ doc, onClose, onDone, onError }) {
+        const [justification, setJustification] = useState("");
+        const [submitting, setSubmitting] = useState(false);
+
+        async function onSubmit(e) {
+          e.preventDefault();
+          setSubmitting(true);
+          try {
+            await api("/sharing/request", {
+              method: "POST",
+              body: JSON.stringify({ document_id: doc.id, justification: justification || undefined }),
+            });
+            onDone("Permission request submitted to the document owner");
+          } catch (err) {
+            onError(err.error);
+          } finally {
+            setSubmitting(false);
+          }
+        }
+
+        return (
+          <Modal title={`Request access to "${doc.original_filename}"`} onClose={onClose}>
+            <form onSubmit={onSubmit} className="space-y-4">
+              <p className="text-sm text-slate-600">The lawyer who owns this document will be notified and can approve or deny your request.</p>
+              <div>
+                <label className={cls.label}>Justification (optional)</label>
+                <textarea value={justification} onChange={(e) => setJustification(e.target.value)}
+                  className={cls.input} rows={3} maxLength={500} placeholder="Why do you need access?" disabled={submitting}/>
+              </div>
+              <div className="flex justify-end gap-2 pt-2">
+                <button type="button" onClick={onClose} className={cls.btnSecondary} disabled={submitting}>Cancel</button>
+                <button type="submit" className={cls.btnPrimary} disabled={submitting}>
+                  {submitting && <Spinner size={16}/>}Submit request
+                </button>
+              </div>
+            </form>
+          </Modal>
+        );
+      }
+
+      // --- Requests Page (Scenario 1) ---
+      function RequestsPage() {
+        const { user } = useAuth();
+        if (user.role === Role.ASSISTANT) {
+          return (
+            <div className="space-y-6">
+              <h1 className="text-2xl font-bold text-slate-900">Permission requests</h1>
+              <div className={cls.card}>
+                <div className="flex items-start gap-3">
+                  <Icon.AlertCircle width={20} height={20} className="mt-0.5 text-primary-600"/>
+                  <div>
+                    <h3 className="font-semibold text-slate-900">How requests work</h3>
+                    <p className="mt-1 text-sm text-slate-600">
+                      To request access to a document, go to the <strong>Documents</strong> page,
+                      find a document shared with you, and click the key icon next to it. The lawyer
+                      who owns the document will be notified and can approve or deny your request.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        }
+        return <LawyerApprovalQueue/>;
+      }
+
+      function LawyerApprovalQueue() {
+        const [requests, setRequests] = useState([]);
+        const [loading, setLoading] = useState(true);
+        const [error, setError] = useState(null);
+        const [success, setSuccess] = useState(null);
+        const [resolveTarget, setResolveTarget] = useState(null);
+
+        const refresh = useCallback(async () => {
+          setLoading(true); setError(null);
+          try {
+            const data = await api("/sharing/pending");
+            setRequests(data.requests || []);
+          } catch (err) {
+            setError(err.error);
+          } finally {
+            setLoading(false);
+          }
+        }, []);
+        useEffect(() => { refresh(); }, [refresh]);
+
+        async function onDeny(req) {
+          if (!confirm("Deny this permission request?")) return;
+          try {
+            await api(`/sharing/deny/${req.id}`, { method: "POST" });
+            setSuccess("Request denied");
+            refresh();
+          } catch (err) {
+            setError(err.error);
+          }
+        }
+
+        if (loading) return <PageLoader/>;
+        return (
+          <div className="space-y-6">
+            <div>
+              <h1 className="text-2xl font-bold text-slate-900">Pending requests</h1>
+              <p className="text-sm text-slate-600">Permission requests from assistants awaiting your decision.</p>
+            </div>
+            {error && <Banner type="error" message={error} onDismiss={() => setError(null)}/>}
+            {success && <Banner type="success" message={success} onDismiss={() => setSuccess(null)}/>}
+
+            {requests.length === 0 ? (
+              <EmptyState title="No pending requests" description="When an assistant requests permission to one of your documents, it will appear here."/>
+            ) : (
+              <div className="space-y-3">
+                {requests.map(req => (
+                  <div key={req.id} className={cls.card}>
+                    <div className="flex flex-wrap items-start justify-between gap-4">
+                      <div className="flex-1">
+                        <p className="text-sm text-slate-500">Document</p>
+                        <p className="font-mono text-xs text-slate-700">{req.document_id}</p>
+                        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                          <div>
+                            <p className="text-xs text-slate-500">Requester</p>
+                            <p className="font-mono text-sm text-slate-900">{req.requester_id}</p>
+                          </div>
+                          <div>
+                            <p className="text-xs text-slate-500">Requested at</p>
+                            <p className="text-sm text-slate-900">{formatDate(req.requested_at)}</p>
+                          </div>
+                        </div>
+                        {req.justification && (
+                          <div className="mt-3">
+                            <p className="text-xs text-slate-500">Justification</p>
+                            <p className="text-sm text-slate-700">{req.justification}</p>
+                          </div>
+                        )}
+                      </div>
+                      <div className="flex flex-col gap-2 sm:flex-row">
+                        <button onClick={() => setResolveTarget(req)} className={cls.btnPrimary}>
+                          <Icon.Check width={16} height={16}/>Approve
+                        </button>
+                        <button onClick={() => onDeny(req)} className={cls.btnDanger}>
+                          <Icon.X width={16} height={16}/>Deny
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {resolveTarget && (
+              <ApproveModal request={resolveTarget} onClose={() => setResolveTarget(null)}
+                onDone={(m) => { setResolveTarget(null); setSuccess(m); refresh(); }} onError={setError}/>
+            )}
+          </div>
+        );
+      }
+
+      function ApproveModal({ request, onClose, onDone, onError }) {
+        const [permissionType, setPermissionType] = useState(PermissionType.VIEW);
+        const [expires, setExpires] = useState(30);
+        const [submitting, setSubmitting] = useState(false);
+
+        async function onSubmit() {
+          setSubmitting(true);
+          try {
+            await api("/sharing/approve", {
+              method: "POST",
+              body: JSON.stringify({
+                request_id: request.id,
+                permission_type: permissionType,
+                expires_in_days: expires === "" ? null : Number(expires),
+              }),
+            });
+            onDone("Request approved and access granted");
+          } catch (err) {
+            onError(err.error);
+          } finally {
+            setSubmitting(false);
+          }
+        }
+
+        return (
+          <Modal title="Approve request" onClose={onClose}>
+            <div className="space-y-4">
+              <div>
+                <label className={cls.label}>Permission to grant</label>
+                <select value={permissionType} onChange={(e) => setPermissionType(e.target.value)}
+                  className={cls.input} disabled={submitting}>
+                  <option value={PermissionType.VIEW}>View only</option>
+                  <option value={PermissionType.DOWNLOAD}>Download</option>
+                  <option value={PermissionType.SHARE}>Share (re-grant)</option>
+                </select>
+              </div>
+              <div>
+                <label className={cls.label}>Expires in (days)</label>
+                <input type="number" min={1} max={365} value={expires}
+                  onChange={(e) => setExpires(e.target.value === "" ? "" : Number(e.target.value))}
+                  className={cls.input} placeholder="Never expires" disabled={submitting}/>
+              </div>
+              <div className="flex justify-end gap-2 pt-2">
+                <button onClick={onClose} className={cls.btnSecondary} disabled={submitting}>Cancel</button>
+                <button onClick={onSubmit} className={cls.btnPrimary} disabled={submitting}>
+                  {submitting && <Spinner size={16}/>}Grant access
+                </button>
+              </div>
+            </div>
+          </Modal>
+        );
+      }
+
+      // --- Profile Page ---
+      function ProfilePage() {
+        const [profile, setProfile] = useState(null);
+        const [activity, setActivity] = useState([]);
+        const [loading, setLoading] = useState(true);
+        const [error, setError] = useState(null);
+        const [success, setSuccess] = useState(null);
+        const [pwd, setPwd] = useState({ current: "", next: "", confirm: "" });
+        const [submittingPwd, setSubmittingPwd] = useState(false);
+
+        useEffect(() => {
+          let cancelled = false;
+          (async () => {
+            try {
+              const [p, a] = await Promise.all([api("/users/me"), api("/users/me/activity?limit=20")]);
+              if (!cancelled) { setProfile(p.profile); setActivity(a.activity || []); }
+            } catch (err) {
+              if (!cancelled) setError(err.error);
+            } finally {
+              if (!cancelled) setLoading(false);
+            }
+          })();
+          return () => { cancelled = true; };
+        }, []);
+
+        async function onChangePwd(e) {
+          e.preventDefault();
+          setError(null);
+          if (pwd.next !== pwd.confirm) return setError("New passwords do not match");
+          if (pwd.next === pwd.current) return setError("New password must differ from current");
+          setSubmittingPwd(true);
+          try {
+            const res = await api("/users/me/password", {
+              method: "PUT",
+              body: JSON.stringify({ current_password: pwd.current, new_password: pwd.next }),
+            });
+            setSuccess(res.message || "Password changed successfully");
+            setPwd({ current: "", next: "", confirm: "" });
+          } catch (err) {
+            setError(err.error);
+          } finally {
+            setSubmittingPwd(false);
+          }
+        }
+
+        if (loading) return <PageLoader/>;
+        if (!profile) return <Banner type="error" message="Could not load profile"/>;
+
+        return (
+          <div className="space-y-6">
+            <h1 className="text-2xl font-bold text-slate-900">Profile & settings</h1>
+            {error && <Banner type="error" message={error} onDismiss={() => setError(null)}/>}
+            {success && <Banner type="success" message={success} onDismiss={() => setSuccess(null)}/>}
+
+            <div className={cls.card}>
+              <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-slate-900">
+                <Icon.User width={18} height={18}/>Account information
+              </h2>
+              <dl className="grid gap-4 sm:grid-cols-2">
+                <PRow label="Full name" value={profile.full_name}/>
+                <PRow label="Email" value={profile.email}/>
+                <PRow label="Role" value={<RoleBadge role={profile.role}/>}/>
+                <PRow label="Status" value={
+                  <span className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium ${profile.is_active ? "bg-emerald-100 text-emerald-800" : "bg-red-100 text-red-800"}`}>
+                    {profile.is_active ? "Active" : "Inactive"}
+                  </span>
+                }/>
+                <PRow label="Member since" value={formatDate(profile.created_at)}/>
+                <PRow label="Last login" value={profile.last_login_at ? formatDate(profile.last_login_at) : "â€”"}/>
+              </dl>
+            </div>
+
+            <div className={cls.card}>
+              <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-slate-900">
+                <Icon.Key width={18} height={18}/>Change password
+              </h2>
+              <p className="mb-4 text-sm text-slate-600">
+                You'll need to enter your current password as proof of identity. Distinct from
+                admin-initiated reset (FR12) â€” both are audited.
+              </p>
+              <form onSubmit={onChangePwd} className="grid gap-4 md:grid-cols-2" noValidate>
+                <div className="md:col-span-2">
+                  <label className={cls.label}>Current password</label>
+                  <input type="password" required value={pwd.current} onChange={(e) => setPwd({...pwd, current: e.target.value})}
+                    className={cls.input} disabled={submittingPwd}/>
+                </div>
+                <div>
+                  <label className={cls.label}>New password</label>
+                  <input type="password" required minLength={8} maxLength={72} value={pwd.next}
+                    onChange={(e) => setPwd({...pwd, next: e.target.value})} className={cls.input} disabled={submittingPwd}/>
+                  <p className="mt-1 text-xs text-slate-500">â‰¥8 chars, with uppercase, lowercase & digit.</p>
+                </div>
+                <div>
+                  <label className={cls.label}>Confirm new password</label>
+                  <input type="password" required value={pwd.confirm}
+                    onChange={(e) => setPwd({...pwd, confirm: e.target.value})} className={cls.input} disabled={submittingPwd}/>
+                </div>
+                <div className="md:col-span-2">
+                  <button type="submit" className={cls.btnPrimary}
+                    disabled={submittingPwd || !pwd.current || !pwd.next || !pwd.confirm}>
+                    {submittingPwd && <Spinner size={16}/>}
+                    {submittingPwd ? "Changingâ€¦" : "Change password"}
+                  </button>
+                </div>
+              </form>
+            </div>
+
+            <div className={cls.card}>
+              <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold text-slate-900">
+                <Icon.Activity width={18} height={18}/>Recent activity
+              </h2>
+              <p className="mb-4 text-sm text-slate-600">Your recent actions. All entries are HMAC-signed for tamper detection.</p>
+              {activity.length === 0 ? (
+                <EmptyState title="No recent activity"/>
+              ) : (
+                <div className="overflow-hidden rounded-lg border border-slate-200">
+                  <table className="min-w-full divide-y divide-slate-200 text-sm">
+                    <thead className="bg-slate-50"><tr><Th>Action</Th><Th>Resource</Th><Th>IP</Th><Th>When</Th></tr></thead>
+                    <tbody className="divide-y divide-slate-200 bg-white">
+                      {activity.map((e, i) => (
+                        <tr key={i}>
+                          <Td className="font-mono text-xs">{e.action}</Td>
+                          <Td className="font-mono text-xs text-slate-500">{e.resource_id ? e.resource_id.slice(0,8) : "â€”"}</Td>
+                          <Td className="font-mono text-xs text-slate-500">{e.ip_address || "â€”"}</Td>
+                          <Td className="text-xs">{formatDate(e.timestamp)}</Td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      }
+      function PRow({ label, value }) {
+        return (
+          <div>
+            <dt className="text-xs font-medium uppercase tracking-wide text-slate-500">{label}</dt>
+            <dd className="mt-1 text-sm text-slate-900">{value}</dd>
+          </div>
+        );
+      }
+
+      // --- Admin Users Page (Process 2) ---
+      function AdminUsersPage() {
+        const [error, setError] = useState(null);
+        const [success, setSuccess] = useState(null);
+        const [showCreate, setShowCreate] = useState(false);
+        const [resetTarget, setResetTarget] = useState("");
+
+        async function onResetPassword(e) {
+          e.preventDefault();
+          if (!resetTarget) return;
+          try {
+            const res = await api("/admin/users/password-reset", {
+              method: "POST",
+              body: JSON.stringify({ user_email: resetTarget }),
+            });
+            setSuccess(res.message || "Password reset token generated. Check server console for the token (dev mode).");
+            setResetTarget("");
+          } catch (err) {
+            setError(err.error);
+          }
+        }
+
+        return (
+          <div className="space-y-6">
+            <div>
+              <h1 className="text-2xl font-bold text-slate-900">User management</h1>
+              <p className="text-sm text-slate-600">
+                Process 2 DFD: Create users, change roles, reset passwords. Admin actions never touch documents (FR11).
+              </p>
+            </div>
+            {error && <Banner type="error" message={error} onDismiss={() => setError(null)}/>}
+            {success && <Banner type="success" message={success} onDismiss={() => setSuccess(null)}/>}
+
+            <div className={cls.card}>
+              <div className="flex items-center justify-between">
+                <h2 className="text-lg font-semibold text-slate-900">Create user</h2>
+                <button onClick={() => setShowCreate(true)} className={cls.btnPrimary}>
+                  <Icon.User width={16} height={16}/>New user
+                </button>
+              </div>
+              <p className="mt-2 text-sm text-slate-600">Admin-only: only existing admins can create new admin accounts (FR11).</p>
+            </div>
+
+            <div className={cls.card}>
+              <h2 className="mb-3 text-lg font-semibold text-slate-900">Reset user password</h2>
+              <p className="mb-4 text-sm text-slate-600">Generate a single-use, 1-hour-expiry reset token. Token is delivered via secure channel (in dev: server console).</p>
+              <form onSubmit={onResetPassword} className="flex flex-wrap gap-2">
+                <input type="email" required value={resetTarget} onChange={(e) => setResetTarget(e.target.value)}
+                  placeholder="user@example.com" className={`${cls.input} max-w-md`}/>
+                <button type="submit" className={cls.btnPrimary}>
+                  <Icon.Key width={16} height={16}/>Generate reset token
+                </button>
+              </form>
+            </div>
+
+            <div className={cls.card}>
+              <h2 className="mb-3 text-lg font-semibold text-slate-900">Change user role</h2>
+              <p className="mb-4 text-sm text-slate-600">
+                Use the form below to update a user's role. Requires the target user's UUID
+                (visible in their profile or in audit logs).
+              </p>
+              <ChangeRoleForm onError={setError} onSuccess={setSuccess}/>
+            </div>
+
+            <div className={cls.card}>
+              <h2 className="mb-3 text-lg font-semibold text-slate-900">Deactivate user</h2>
+              <p className="mb-4 text-sm text-slate-600">Soft-delete: marks user inactive. Audit trail is preserved (NFR13).</p>
+              <DeleteUserForm onError={setError} onSuccess={setSuccess}/>
+            </div>
+
+            {showCreate && <CreateUserModal onClose={() => setShowCreate(false)}
+              onDone={(m) => { setShowCreate(false); setSuccess(m); }} onError={setError}/>}
+          </div>
+        );
+      }
+
+      function CreateUserModal({ onClose, onDone, onError }) {
+        const [form, setForm] = useState({ email:"", password:"", full_name:"", role: Role.CLIENT });
+        const [submitting, setSubmitting] = useState(false);
+        const upd = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+
+        async function onSubmit(e) {
+          e.preventDefault();
+          setSubmitting(true);
+          try {
+            const res = await api("/admin/users", {
+              method: "POST",
+              body: JSON.stringify(form),
+            });
+            onDone(`User ${res.user.email} created`);
+          } catch (err) {
+            onError(err.error);
+          } finally {
+            setSubmitting(false);
+          }
+        }
+        return (
+          <Modal title="Create new user" onClose={onClose}>
+            <form onSubmit={onSubmit} className="space-y-4">
+              <div>
+                <label className={cls.label}>Full name</label>
+                <input type="text" required minLength={2} maxLength={100} value={form.full_name} onChange={upd("full_name")} className={cls.input} disabled={submitting}/>
+              </div>
+              <div>
+                <label className={cls.label}>Email</label>
+                <input type="email" required value={form.email} onChange={upd("email")} className={cls.input} disabled={submitting}/>
+              </div>
+              <div>
+                <label className={cls.label}>Role</label>
+                <select value={form.role} onChange={upd("role")} className={cls.input} disabled={submitting}>
+                  <option value={Role.LAWYER}>Lawyer</option>
+                  <option value={Role.CLIENT}>Client</option>
+                  <option value={Role.ASSISTANT}>Assistant</option>
+                  <option value={Role.ADMIN}>Admin</option>
+                </select>
+              </div>
+              <div>
+                <label className={cls.label}>Initial password</label>
+                <input type="password" required minLength={8} maxLength={72} value={form.password} onChange={upd("password")} className={cls.input} disabled={submitting}/>
+                <p className="mt-1 text-xs text-slate-500">Must include uppercase, lowercase, and digit.</p>
+              </div>
+              <div className="flex justify-end gap-2 pt-2">
+                <button type="button" onClick={onClose} className={cls.btnSecondary} disabled={submitting}>Cancel</button>
+                <button type="submit" className={cls.btnPrimary} disabled={submitting}>
+                  {submitting && <Spinner size={16}/>}Create user
+                </button>
+              </div>
+            </form>
+          </Modal>
+        );
+      }
+
+      function ChangeRoleForm({ onError, onSuccess }) {
+        const [userId, setUserId] = useState("");
+        const [newRole, setNewRole] = useState(Role.CLIENT);
+        const [submitting, setSubmitting] = useState(false);
+
+        async function onSubmit(e) {
+          e.preventDefault();
+          setSubmitting(true);
+          try {
+            const res = await api("/admin/users/role", {
+              method: "POST",
+              body: JSON.stringify({ user_id: userId, new_role: newRole }),
+            });
+            onSuccess(`Role updated for ${res.user.email}`);
+            setUserId("");
+          } catch (err) {
+            onError(err.error);
+          } finally {
+            setSubmitting(false);
+          }
+        }
+        return (
+          <form onSubmit={onSubmit} className="grid gap-3 md:grid-cols-3">
+            <input type="text" required value={userId} onChange={(e) => setUserId(e.target.value)}
+              placeholder="User UUID" className={`${cls.input} font-mono text-xs`} disabled={submitting}/>
+            <select value={newRole} onChange={(e) => setNewRole(e.target.value)} className={cls.input} disabled={submitting}>
+              <option value={Role.LAWYER}>Lawyer</option>
+              <option value={Role.CLIENT}>Client</option>
+              <option value={Role.ASSISTANT}>Assistant</option>
+              <option value={Role.ADMIN}>Admin</option>
+            </select>
+            <button type="submit" className={cls.btnPrimary} disabled={submitting || !userId}>
+              {submitting && <Spinner size={16}/>}Update role
+            </button>
+          </form>
+        );
+      }
+
+      function DeleteUserForm({ onError, onSuccess }) {
+        const [userId, setUserId] = useState("");
+        const [submitting, setSubmitting] = useState(false);
+
+        async function onSubmit(e) {
+          e.preventDefault();
+          if (!confirm("Deactivate this user? They will no longer be able to log in. Audit trail is preserved.")) return;
+          setSubmitting(true);
+          try {
+            await api(`/admin/users/${userId}`, { method: "DELETE" });
+            onSuccess("User deactivated");
+            setUserId("");
+          } catch (err) {
+            onError(err.error);
+          } finally {
+            setSubmitting(false);
+          }
+        }
+        return (
+          <form onSubmit={onSubmit} className="flex flex-wrap gap-2">
+            <input type="text" required value={userId} onChange={(e) => setUserId(e.target.value)}
+              placeholder="User UUID" className={`${cls.input} max-w-md font-mono text-xs`} disabled={submitting}/>
+            <button type="submit" className={cls.btnDanger} disabled={submitting || !userId}>
+              {submitting && <Spinner size={16}/>}Deactivate user
+            </button>
+          </form>
+        );
+      }
+
+      // --- Admin Audit Integrity Page (DREAD #5 mitigation) ---
+      function AuditIntegrityPage() {
+        const [result, setResult] = useState(null);
+        const [loading, setLoading] = useState(false);
+        const [error, setError] = useState(null);
+
+        async function runCheck() {
+          setLoading(true); setError(null);
+          try {
+            const data = await api("/admin/audit/integrity");
+            setResult(data.integrity_check);
+          } catch (err) {
+            setError(err.error);
+          } finally {
+            setLoading(false);
+          }
+        }
+
+        return (
+          <div className="space-y-6">
+            <div>
+              <h1 className="text-2xl font-bold text-slate-900">Audit log integrity</h1>
+              <p className="text-sm text-slate-600">
+                DREAD #5 mitigation: detects if any audit log entry has been modified by re-computing
+                its HMAC signature with the separate log signing key (NFR13).
+              </p>
+            </div>
+            {error && <Banner type="error" message={error} onDismiss={() => setError(null)}/>}
+
+            <div className={cls.card}>
+              <button onClick={runCheck} disabled={loading} className={cls.btnPrimary}>
+                {loading ? <Spinner size={16}/> : <Icon.Refresh width={16} height={16}/>}
+                {loading ? "Runningâ€¦" : "Run integrity check"}
+              </button>
+
+              {result && (
+                <div className="mt-6 space-y-4">
+                  <div className="grid gap-4 sm:grid-cols-3">
+                    <Stat label="Total logs" value={result.total} color="slate"/>
+                    <Stat label="Valid (HMAC matches)" value={result.valid} color="emerald"/>
+                    <Stat label="Tampered" value={result.tampered} color={result.tampered > 0 ? "red" : "slate"}/>
+                  </div>
+                  {result.tampered === 0 ? (
+                    <Banner type="success" message="All audit log entries pass HMAC verification. No tampering detected."/>
+                  ) : (
+                    <div className="space-y-2">
+                      <Banner type="error" message={`${result.tampered} log entries failed HMAC verification â€” possible tampering.`}/>
+                      <details className="text-sm">
+                        <summary className="cursor-pointer text-slate-700">Show tampered entry IDs</summary>
+                        <ul className="mt-2 space-y-1 font-mono text-xs text-slate-600">
+                          {result.tampered_ids.map(id => <li key={id}>{id}</li>)}
+                        </ul>
+                      </details>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      }
+
+      function Stat({ label, value, color = "slate" }) {
+        const colors = {
+          slate: "bg-slate-50 text-slate-700",
+          emerald: "bg-emerald-50 text-emerald-700",
+          red: "bg-red-50 text-red-700",
+        };
+        return (
+          <div className={`rounded-lg p-4 ${colors[color]}`}>
+            <p className="text-xs font-medium uppercase tracking-wide opacity-80">{label}</p>
+            <p className="mt-1 text-2xl font-bold">{value}</p>
+          </div>
+        );
+      }
+
+      // ============================================================
+      // 6. ROUTER + APP ROOT
+      // ============================================================
+
+      // Tiny hash router: tracks window.location.hash and re-renders.
+      // For an academic project, this is plenty â€” no need for react-router.
+      function useHashRoute() {
+        const [route, setRoute] = useState(window.location.hash || "#/login");
+        useEffect(() => {
+          const onHash = () => setRoute(window.location.hash || "#/login");
+          window.addEventListener("hashchange", onHash);
+          return () => window.removeEventListener("hashchange", onHash);
+        }, []);
+        return route.replace(/^#/, "").split("?")[0]; // strip query for routing
+      }
+
+      function AppContent() {
+        const route = useHashRoute();
+        const { user, isAuthenticated } = useAuth();
+
+        // Public routes
+        if (!isAuthenticated) {
+          if (route.startsWith("/register")) return <RegisterPage/>;
+          return <LoginPage/>;
+        }
+
+        // Authenticated routing
+        let page;
+        if (route.startsWith("/dashboard")) {
+          page = user.role === Role.ADMIN ? <AdminUsersPage/> : <DashboardPage/>;
+        } else if (route.startsWith("/documents")) {
+          if (user.role === Role.ADMIN) {
+            // FR11 enforcement at the UI: redirect admin away from documents
+            window.location.hash = "#/admin"; return null;
+          }
+          page = <DocumentsPage/>;
+        } else if (route.startsWith("/requests")) {
+          if (user.role === Role.ADMIN || user.role === Role.CLIENT) {
+            window.location.hash = user.role === Role.ADMIN ? "#/admin" : "#/dashboard";
+            return null;
+          }
+          page = <RequestsPage/>;
+        } else if (route.startsWith("/admin/audit")) {
+          if (user.role !== Role.ADMIN) { window.location.hash = "#/dashboard"; return null; }
+          page = <AuditIntegrityPage/>;
+        } else if (route.startsWith("/admin")) {
+          if (user.role !== Role.ADMIN) { window.location.hash = "#/dashboard"; return null; }
+          page = <AdminUsersPage/>;
+        } else if (route.startsWith("/profile")) {
+          page = <ProfilePage/>;
+        } else {
+          // Default landing â€” role-aware
+          window.location.hash = user.role === Role.ADMIN ? "#/admin" : "#/dashboard";
+          return null;
+        }
+
+        return <AppLayout currentRoute={route}>{page}</AppLayout>;
+      }
+
+      function App() {
+        return (
+          <AuthProvider>
+            <AppContent/>
+          </AuthProvider>
+        );
+      }
+
+      ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+    </script>
+  </body>
+</html>
+
