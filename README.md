@@ -81,15 +81,6 @@ After `.env` is ready, run:
 python scripts/create_demo_users.py
 ```
 
-Demo credentials:
-
-```text
-lawyer@example.com     Test@1234
-client@example.com     Test@1234
-assistant@example.com  Test@1234
-admin@example.com      Test@1234
-```
-
 ## Demo flow
 
 1. Login as lawyer, client, assistant, or admin.
