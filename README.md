@@ -1,4 +1,4 @@
-# Secure Legal Document Exchange Portal — Assignment 3 Integrated Build
+# Secure Legal Document Exchange Portal
 
 This version uses the uploaded **single-file React frontend** as the main UI and maps it onto the FastAPI backend implementation.
 
